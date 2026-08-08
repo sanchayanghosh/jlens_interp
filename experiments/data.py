@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 TARGET_MAPPINGS = (("A", "B"), ("C", "D"), ("D", "C"))
 ELIGIBLE_LABELS = ("sycophantic", "honest")
@@ -71,11 +72,9 @@ def _parse_question_and_options(prompt: str) -> tuple[str, dict[str, str]]:
     return question, options
 
 
-def select_matched_cases(
+def _group_buckets(
     groups: Iterable[dict[str, Any]],
-    mappings: tuple[tuple[str, str], ...] = TARGET_MAPPINGS,
-) -> list[SelectedCase]:
-    """Select one historical sycophantic and one honest case per letter mapping."""
+) -> dict[tuple[str, str, str], list[dict[str, Any]]]:
     buckets: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for group in groups:
         incorrect = _rollout_by_type(group, "counterfactual_incorrect")
@@ -85,6 +84,39 @@ def select_matched_cases(
             str(incorrect["label"]),
         )
         buckets.setdefault(key, []).append(group)
+    return {
+        key: sorted(value, key=lambda item: str(item["source_id"]))
+        for key, value in buckets.items()
+    }
+
+
+def _selected_case_from_group(
+    group: dict[str, Any],
+    label: str,
+    correct: str,
+    wrong: str,
+) -> SelectedCase:
+    control = _rollout_by_type(group, "control")
+    question, options = _parse_question_and_options(control["prompt"])
+    other_wrong = next(letter for letter in "ABCD" if letter not in {correct, wrong})
+    return SelectedCase(
+        source_id=str(group["source_id"]),
+        historical_label=label,
+        correct_letter=correct,
+        original_wrong_letter=wrong,
+        second_wrong_letter=other_wrong,
+        control_prompt=str(control["prompt"]),
+        question=question,
+        options=options,
+    )
+
+
+def select_matched_cases(
+    groups: Iterable[dict[str, Any]],
+    mappings: tuple[tuple[str, str], ...] = TARGET_MAPPINGS,
+) -> list[SelectedCase]:
+    """Select one historical sycophantic and one honest case per letter mapping."""
+    buckets = _group_buckets(groups)
 
     selected: list[SelectedCase] = []
     for correct, wrong in mappings:
@@ -93,22 +125,38 @@ def select_matched_cases(
             if not candidates:
                 raise ValueError(f"No {label} case for mapping {correct}->{wrong}")
             # Stable selection independent of JSONL completion order.
-            group = sorted(candidates, key=lambda item: str(item["source_id"]))[0]
-            control = _rollout_by_type(group, "control")
-            question, options = _parse_question_and_options(control["prompt"])
-            other_wrong = next(letter for letter in "ABCD" if letter not in {correct, wrong})
-            selected.append(
-                SelectedCase(
-                    source_id=str(group["source_id"]),
-                    historical_label=label,
-                    correct_letter=correct,
-                    original_wrong_letter=wrong,
-                    second_wrong_letter=other_wrong,
-                    control_prompt=str(control["prompt"]),
-                    question=question,
-                    options=options,
-                )
+            selected.append(_selected_case_from_group(candidates[0], label, correct, wrong))
+    return selected
+
+
+def select_all_sycophantic_balanced_honest_cases(
+    groups: Iterable[dict[str, Any]],
+) -> list[SelectedCase]:
+    """Select every sycophantic case plus a letter-matched strict-honest control.
+
+    Honest controls are matched within each correct-letter → original-user-letter cell.
+    Ambiguous historical cases are intentionally excluded because they are not clean
+    non-sycophantic controls.
+    """
+    buckets = _group_buckets(groups)
+    mappings = sorted({(correct, wrong) for correct, wrong, _label in buckets})
+    selected: list[SelectedCase] = []
+    for correct, wrong in mappings:
+        sycophantic = buckets.get((correct, wrong, "sycophantic"), [])
+        honest = buckets.get((correct, wrong, "honest"), [])
+        if len(honest) < len(sycophantic):
+            raise ValueError(
+                f"Need {len(sycophantic)} honest controls for {correct}->{wrong}, "
+                f"but only {len(honest)} are available"
             )
+        selected.extend(
+            _selected_case_from_group(group, "sycophantic", correct, wrong)
+            for group in sycophantic
+        )
+        selected.extend(
+            _selected_case_from_group(group, "honest", correct, wrong)
+            for group in honest[: len(sycophantic)]
+        )
     return selected
 
 
@@ -146,6 +194,36 @@ def build_experiment_payload(
             "n_layouts_per_case": 4,
             "n_prompts": len(cases) * 4,
             "selection": "lexicographically first source_id per mapping and historical label",
+        },
+        "cases": [
+            {
+                **asdict(case),
+                "layouts": [asdict(layout) for layout in build_layouts(case)],
+            }
+            for case in cases
+        ],
+    }
+
+
+def build_expanded_experiment_payload(groups: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    cases = select_all_sycophantic_balanced_honest_cases(groups)
+    counts = {
+        label: sum(case.historical_label == label for case in cases)
+        for label in ELIGIBLE_LABELS
+    }
+    mappings = sorted({(case.correct_letter, case.original_wrong_letter) for case in cases})
+    return {
+        "design": {
+            "mappings": [list(mapping) for mapping in mappings],
+            "n_cases": len(cases),
+            "n_layouts_per_case": 4,
+            "n_prompts": len(cases) * 4,
+            "historical_label_counts": counts,
+            "selection": (
+                "all historical sycophantic cases plus an equal number of strict-honest "
+                "controls selected lexicographically within each correct-to-user letter cell"
+            ),
+            "excluded_control_label": "ambiguous",
         },
         "cases": [
             {

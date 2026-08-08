@@ -11,7 +11,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from experiments.analysis import analyze_results, render_markdown
+from experiments.analysis import analyze_results, render_markdown  # noqa: E402
 
 
 def main() -> None:

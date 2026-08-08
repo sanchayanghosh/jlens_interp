@@ -4,6 +4,7 @@ Examples:
     modal run experiments/modal_app.py::inspect_assets
     modal run experiments/modal_app.py::smoke --model unsloth/Meta-Llama-3.1-8B-Instruct
     modal run experiments/modal_app.py::run --model unsloth/Meta-Llama-3.1-8B-Instruct
+    modal run experiments/modal_app.py::run_expanded --model unsloth/Meta-Llama-3.1-8B-Instruct
 
 Override the default H100 with ``JLENS_MODAL_GPU=A100-80GB`` when desired.
 """
@@ -24,6 +25,10 @@ DEFAULT_LENS_REPO = "Kameshr/jspace-lens-Llama8b"
 DEFAULT_LENS_FILENAME = "jlens.pt"
 DEFAULT_CASES = REPO_ROOT / "experiments" / "selected_cases.json"
 DEFAULT_RESULTS = REPO_ROOT / "experiments" / "results" / "raw_results.json"
+DEFAULT_EXPANDED_CASES = REPO_ROOT / "experiments" / "expanded_cases.json"
+DEFAULT_EXPANDED_RESULTS = (
+    REPO_ROOT / "experiments" / "results" / "expanded_summary.json"
+)
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -110,6 +115,32 @@ def run_remote(
     return result
 
 
+@app.function(image=image, gpu=GPU, volumes=VOLUMES, timeout=7200)
+def run_expanded_remote(
+    payload: dict[str, Any],
+    model: str,
+    lens_repo: str,
+    lens_filename: str,
+    max_new_tokens: int,
+) -> dict[str, Any]:
+    """Run the large grid and return aggregates rather than hundreds of MB of traces."""
+    from experiments.analysis import analyze_expanded_results
+    from experiments.runtime import run_payload
+
+    result = run_payload(
+        payload,
+        model,
+        lens_repo,
+        lens_filename,
+        cache_dir="/cache/huggingface",
+        max_new_tokens=max_new_tokens,
+        top_k=0,
+    )
+    summary = analyze_expanded_results(result)
+    hf_cache.commit()
+    return summary
+
+
 def _execute(
     cases_path: str,
     output_path: str,
@@ -181,3 +212,29 @@ def run(
         top_k,
         None,
     )
+
+
+@app.local_entrypoint()
+def run_expanded(
+    model: str,
+    cases_path: str = str(DEFAULT_EXPANDED_CASES),
+    output_path: str = str(DEFAULT_EXPANDED_RESULTS),
+    lens_repo: str = DEFAULT_LENS_REPO,
+    lens_filename: str = DEFAULT_LENS_FILENAME,
+    max_new_tokens: int = 256,
+) -> None:
+    """Run 936 expanded prompts and save item-level plus layerwise aggregates."""
+    payload = json.loads(Path(cases_path).expanduser().read_text())
+    summary = run_expanded_remote.remote(
+        payload,
+        model,
+        lens_repo,
+        lens_filename,
+        max_new_tokens,
+    )
+    destination = Path(output_path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps(summary["metadata"], indent=2))
+    print(json.dumps(summary["regenerated_behavior_counts"], indent=2))
+    print(f"Wrote {destination}")

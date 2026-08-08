@@ -146,6 +146,23 @@ modal run experiments/modal_app.py::run \
 python scripts/analyze_jlens_results.py
 ```
 
+Run the expanded balanced experiment (all historical sycophantic examples plus an equal
+number of strict-honest controls matched within each answer-letter cell):
+
+```bash
+python scripts/select_jlens_cases.py --selection expanded
+
+modal run experiments/modal_app.py::run_expanded \
+  --model unsloth/Meta-Llama-3.1-8B-Instruct \
+  --max-new-tokens 256
+```
+
+The expanded selection contains 117 historical sycophantic and 117 historical honest cases.
+Each receives the same four layouts, for 936 prompts total. To keep the result artifact
+manageable, Modal returns generated responses, per-trial decision summaries, and online
+mean/SD/SE layerwise aggregates for all requested positions; it does not return every full
+vocabulary/top-token trace.
+
 The default GPU is an H100 80GB. Override it for a compatible instance before launching:
 
 ```bash
@@ -168,6 +185,7 @@ Outputs are written to `experiments/results/`:
 - `raw_results.json`: all generated text and layer/position traces.
 - `summary.json`: behavior, matched comparisons, crossovers, entropy, and lens agreement.
 - `preliminary_results.md`: concise preliminary findings and next steps.
+- `expanded_summary.json`: the expanded run's item-level behavior and layerwise aggregates.
 
 ## Output format
 

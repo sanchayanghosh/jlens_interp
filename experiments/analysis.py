@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from statistics import fmean
-from typing import Any, Iterable
+from typing import Any
 
 CORRECTION_WORDS = ("incorrect", "unfortunately", "but", "however", "actually", "not")
 AFFIRMATION_WORDS = ("indeed", "yes", "correct", "right", "agree")
@@ -277,6 +278,181 @@ def analyze_results(results: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _add_stat(
+    accumulators: dict[tuple[str, str, str, int, str], list[float]],
+    key: tuple[str, str, str, int, str],
+    value: float | None,
+) -> None:
+    if value is None or not math.isfinite(float(value)):
+        return
+    state = accumulators.setdefault(key, [0.0, 0.0, 0.0])
+    numeric = float(value)
+    state[0] += 1
+    state[1] += numeric
+    state[2] += numeric * numeric
+
+
+def _finish_stat(state: list[float]) -> dict[str, float | int]:
+    n = int(state[0])
+    mean = state[1] / n
+    variance = max(0.0, (state[2] - n * mean * mean) / (n - 1)) if n > 1 else 0.0
+    sd = math.sqrt(variance)
+    return {
+        "n": n,
+        "mean": round(mean, 6),
+        "sd": round(sd, 6),
+        "se": round(sd / math.sqrt(n), 6),
+    }
+
+
+def _point_metrics(
+    point: dict[str, Any],
+    user_letter: str,
+    correct_letter: str,
+    baseline: dict[str, Any] | None,
+    correct_opinion: dict[str, Any] | None,
+) -> dict[str, float | None]:
+    margin = _margin(point, user_letter)
+    option_scores = point.get("option_first_token_scores", {})
+    option_margin = (
+        float(option_scores[correct_letter]) - float(option_scores[user_letter])
+        if correct_letter in option_scores and user_letter in option_scores
+        else None
+    )
+    correction = _vocabulary_mean(point, CORRECTION_WORDS)
+    affirmation = _vocabulary_mean(point, AFFIRMATION_WORDS)
+    baseline_margin = _margin(baseline, user_letter) if baseline is not None else None
+    correct_margin = (
+        _margin(correct_opinion, user_letter) if correct_opinion is not None else None
+    )
+    baseline_correction = (
+        _vocabulary_mean(baseline, CORRECTION_WORDS) if baseline is not None else None
+    )
+    baseline_affirmation = (
+        _vocabulary_mean(baseline, AFFIRMATION_WORDS) if baseline is not None else None
+    )
+    return {
+        "correct_user_margin": margin,
+        "option_text_margin": option_margin,
+        "opinion_shift_from_baseline": (
+            margin - baseline_margin
+            if margin is not None and baseline_margin is not None
+            else None
+        ),
+        "opinion_shift_from_correct_opinion": (
+            margin - correct_margin
+            if margin is not None and correct_margin is not None
+            else None
+        ),
+        "entropy_nats": point.get("entropy_nats"),
+        "top_probability": point.get("top_probability"),
+        "correction_minus_affirmation": (
+            correction - affirmation
+            if correction is not None and affirmation is not None
+            else None
+        ),
+        "correction_shift_from_baseline": (
+            correction - baseline_correction
+            if correction is not None and baseline_correction is not None
+            else None
+        ),
+        "affirmation_shift_from_baseline": (
+            affirmation - baseline_affirmation
+            if affirmation is not None and baseline_affirmation is not None
+            else None
+        ),
+    }
+
+
+def _expanded_layerwise_aggregates(results: dict[str, Any]) -> dict[str, Any]:
+    accumulators: dict[tuple[str, str, str, int, str], list[float]] = {}
+    for case in results["cases"]:
+        layouts = _layout_map(case)
+        if not {"no_opinion", "correct_opinion"}.issubset(layouts):
+            continue
+        for layout_name in ("wrong_opinion_1", "wrong_opinion_2"):
+            layout = layouts.get(layout_name)
+            if layout is None:
+                continue
+            outcome = case.get("regenerated_outcomes", {}).get(layout_name, "ambiguous")
+            history = case["historical_label"]
+            groups = (
+                f"regenerated={outcome}",
+                f"historical={history}",
+                f"historical={history}|regenerated={outcome}",
+                f"layout={layout_name}|regenerated={outcome}",
+            )
+            user_letter = str(layout["user_letter"])
+            for position, lens_traces in layout.get("traces", {}).items():
+                for lens, points in lens_traces.items():
+                    baseline_by_layer = {
+                        int(point["layer"]): point
+                        for point in _points(layouts["no_opinion"], position, lens)
+                    }
+                    correct_by_layer = {
+                        int(point["layer"]): point
+                        for point in _points(layouts["correct_opinion"], position, lens)
+                    }
+                    for point in points:
+                        layer = int(point["layer"])
+                        metrics = _point_metrics(
+                            point,
+                            user_letter,
+                            case["correct_letter"],
+                            baseline_by_layer.get(layer),
+                            correct_by_layer.get(layer),
+                        )
+                        for group in groups:
+                            for metric, value in metrics.items():
+                                _add_stat(
+                                    accumulators,
+                                    (group, position, lens, layer, metric),
+                                    value,
+                                )
+
+    nested: dict[str, Any] = {}
+    for (group, position, lens, layer, metric), state in sorted(accumulators.items()):
+        layer_entry = (
+            nested.setdefault(group, {})
+            .setdefault(position, {})
+            .setdefault(lens, {})
+            .setdefault(str(layer), {})
+        )
+        layer_entry[metric] = _finish_stat(state)
+    return nested
+
+
+def analyze_expanded_results(results: dict[str, Any]) -> dict[str, Any]:
+    """Analyze a large run and retain aggregates instead of full per-token traces."""
+    summary = analyze_results(results)
+    summary["design"] = results.get("design", {})
+    summary["layerwise_aggregates"] = _expanded_layerwise_aggregates(results)
+    summary["generation_records"] = [
+        {
+            "source_id": case["source_id"],
+            "historical_label": case["historical_label"],
+            "correct_letter": case["correct_letter"],
+            "original_wrong_letter": case.get("original_wrong_letter"),
+            "second_wrong_letter": case.get("second_wrong_letter"),
+            "regenerated_answers": case.get("regenerated_answers", {}),
+            "regenerated_outcomes": case.get("regenerated_outcomes", {}),
+            "layouts": [
+                {
+                    "name": layout["name"],
+                    "user_letter": layout["user_letter"],
+                    "response": layout.get("response"),
+                    "generated_answer": layout.get("generated_answer"),
+                    "prompt_token_count": layout.get("prompt_token_count"),
+                    "generated_token_count": layout.get("generated_token_count"),
+                }
+                for layout in case["layouts"]
+            ],
+        }
+        for case in results["cases"]
+    ]
+    return summary
+
+
 def render_markdown(summary: dict[str, Any]) -> str:
     """Render a preliminary, appropriately cautious result section."""
     metadata = summary["metadata"]
@@ -338,25 +514,27 @@ def render_markdown(summary: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "| Regenerated outcome | n | Jacobian margin | Jacobian shift | Logit margin | Logit shift |",
+            "| Regenerated outcome | n | Jacobian margin | Jacobian shift | "
+            "Logit margin | Logit shift |",
             "| --- | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for outcome in ("sycophantic", "resistant", "ambiguous"):
         group = summary["grouped_metrics"][outcome]
         j = group["assistant_boundary"]["jacobian_lens"]
-        l = group["assistant_boundary"]["logit_lens"]
+        logit = group["assistant_boundary"]["logit_lens"]
         lines.append(
             f"| {outcome.capitalize()} | {group['n']} | {display(j['last_margin'])} | "
-            f"{display(j['opinion_shift_from_baseline'])} | {display(l['last_margin'])} | "
-            f"{display(l['opinion_shift_from_baseline'])} |"
+            f"{display(j['opinion_shift_from_baseline'])} | {display(logit['last_margin'])} | "
+            f"{display(logit['opinion_shift_from_baseline'])} |"
         )
 
     lines.extend(
         [
             "",
             "For the eight resistant trials, the opinion still shifted assistant-boundary "
-            f"evidence toward the user's distractor (mean shift {resistant_boundary_j['opinion_shift_from_baseline']} "
+            "evidence toward the user's distractor (mean shift "
+            f"{resistant_boundary_j['opinion_shift_from_baseline']} "
             f"with Jacobian Lens and {resistant_boundary_l['opinion_shift_from_baseline']} with "
             "Logit Lens). A persistent negative boundary margin appeared in "
             f"{resistant_boundary_j['persistent_crossover_n']}/8 Jacobian traces and "
@@ -364,7 +542,8 @@ def render_markdown(summary: dict[str, Any]) -> str:
             "the emitted answer, however, mean margins were strongly correct-favoring "
             f"({resistant_answer_j['last_margin']} Jacobian; {resistant_answer_l['last_margin']} "
             "Logit), with no persistent negative crossover in either lens. Mean Jacobian–Logit "
-            f"margin correlation also rose from {resistant['assistant_boundary']['mean_lens_margin_correlation']} "
+            "margin correlation also rose from "
+            f"{resistant['assistant_boundary']['mean_lens_margin_correlation']} "
             f"at the boundary to {resistant['pre_answer']['mean_lens_margin_correlation']} before "
             "the answer. Descriptively, the wrong opinion affected the initial response state but "
             "did not override the final answer decision in these eligible trials.",
@@ -387,7 +566,8 @@ def render_markdown(summary: dict[str, Any]) -> str:
             "checkpoint, retaining only questions whose no-opinion control is correct.",
             "2. Expand each matched cell to at least 20 questions and bootstrap confidence "
             "intervals for the opinion-induced margin trajectories and crossover layers.",
-            "3. Fit an official exact Anthropic Jacobian Lens on the same checkpoint and compare it "
+            "3. Fit an official exact Anthropic Jacobian Lens on the same checkpoint and "
+            "compare it "
             "against this public 32-projection Hutchinson checkpoint to quantify estimator drift.",
             "4. Test whether any late-layer effect transfers across both wrong distractors while "
             "remaining absent in the correct-opinion control; report correction and affirmation "

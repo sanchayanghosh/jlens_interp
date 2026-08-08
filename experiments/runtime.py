@@ -100,7 +100,9 @@ def _fragment_span(
     return None
 
 
-def _answer_token_offset(tokenizer: Any, generated_ids: Sequence[int], answer: str | None) -> int | None:
+def _answer_token_offset(
+    tokenizer: Any, generated_ids: Sequence[int], answer: str | None
+) -> int | None:
     if answer is None:
         return None
     matches = [
@@ -461,6 +463,13 @@ def run_payload(
                 }
             )
             prompt_count += 1
+            if prompt_count % 25 == 0:
+                elapsed = time.time() - started
+                print(
+                    f"Completed {prompt_count}/{payload['design']['n_prompts']} prompts "
+                    f"in {elapsed:.1f}s",
+                    flush=True,
+                )
         case_result["layouts"] = layout_results
         answers = {layout["name"]: layout["generated_answer"] for layout in layout_results}
         case_result["regenerated_answers"] = answers
@@ -476,7 +485,7 @@ def run_payload(
 
     return {
         "metadata": {
-            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "created_at": datetime.datetime.now(datetime.UTC).isoformat(),
             "model_id": model_id,
             "model_dtype": "bfloat16",
             "decoding": "greedy",

@@ -7,9 +7,19 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from experiments.data import build_experiment_payload, build_layouts, select_matched_cases
-from experiments.analysis import analyze_results, render_markdown
-from experiments.runtime import (
+from experiments.analysis import (  # noqa: E402
+    analyze_expanded_results,
+    analyze_results,
+    render_markdown,
+)
+from experiments.data import (  # noqa: E402
+    build_expanded_experiment_payload,
+    build_experiment_payload,
+    build_layouts,
+    select_all_sycophantic_balanced_honest_cases,
+    select_matched_cases,
+)
+from experiments.runtime import (  # noqa: E402
     classify_regenerated_case,
     extract_answer,
     first_persistent_negative_layer,
@@ -81,12 +91,27 @@ class ExperimentDataTests(unittest.TestCase):
         self.assertIsNone(layouts[0].user_letter)
         self.assertIn(f"answer is {case.correct_letter}", layouts[1].prompt)
         self.assertIn(f"answer is {case.original_wrong_letter}", layouts[2].prompt)
-        self.assertNotIn(case.second_wrong_letter, {case.correct_letter, case.original_wrong_letter})
+        self.assertNotIn(
+            case.second_wrong_letter,
+            {case.correct_letter, case.original_wrong_letter},
+        )
 
     def test_payload_has_24_prompts(self) -> None:
         payload = build_experiment_payload(self.groups)
         self.assertEqual(payload["design"]["n_cases"], 6)
         self.assertEqual(payload["design"]["n_prompts"], 24)
+
+    def test_expanded_selection_uses_all_sycophantic_and_balanced_honest(self) -> None:
+        selected = select_all_sycophantic_balanced_honest_cases(self.groups)
+        counts = {
+            label: sum(case.historical_label == label for case in selected)
+            for label in ("sycophantic", "honest")
+        }
+        self.assertEqual(counts, {"sycophantic": 3, "honest": 3})
+        self.assertEqual(len({case.source_id for case in selected}), 6)
+        payload = build_expanded_experiment_payload(self.groups)
+        self.assertEqual(payload["design"]["n_prompts"], 24)
+        self.assertEqual(payload["design"]["excluded_control_label"], "ambiguous")
 
 
 class RuntimeHelperTests(unittest.TestCase):
@@ -106,7 +131,10 @@ class RuntimeHelperTests(unittest.TestCase):
                 "wrong_opinion_2": "A",
             },
         )
-        self.assertEqual(outcomes, {"wrong_opinion_1": "sycophantic", "wrong_opinion_2": "resistant"})
+        self.assertEqual(
+            outcomes,
+            {"wrong_opinion_1": "sycophantic", "wrong_opinion_2": "resistant"},
+        )
 
     def test_persistent_crossover_requires_all_later_layers_negative(self) -> None:
         trace = [
@@ -179,6 +207,11 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(metrics["opinion_shift_from_baseline"], -3.0)
         self.assertEqual(metrics["persistent_crossover_layer"], 1)
         self.assertIn("## Preliminary results", render_markdown(summary))
+        expanded = analyze_expanded_results(raw)
+        aggregate = expanded["layerwise_aggregates"]["regenerated=sycophantic"]
+        layer = aggregate["assistant_boundary"]["jacobian_lens"]["1"]
+        self.assertEqual(layer["correct_user_margin"]["mean"], -1.0)
+        self.assertEqual(expanded["generation_records"][0]["source_id"], "1")
 
 
 if __name__ == "__main__":
