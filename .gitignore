@@ -9,3 +9,4 @@ __pycache__/
 
 output/*
 !output/README.md
+experiments/results/smoke_results.json
