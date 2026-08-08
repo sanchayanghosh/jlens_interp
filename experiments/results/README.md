@@ -16,3 +16,9 @@ ambiguous/null cases.
 historically sycophantic cases plus 117 strict-honest, answer-letter-matched controls (936
 prompts). It contains generated responses, item-level outcome metrics, and mean/SD/SE
 layerwise aggregates at all six decision positions without duplicating the full raw logits.
+
+`commitment_raw.json` is produced by `modal_app.py::run_commitment`. It covers 330 prompts:
+85 same-question sycophantic/warranted-agreement pairs plus 122 matched
+sycophantic/resistant pairs. `commitment_findings.json` and `commitment_results.md` are
+produced by `scripts/analyze_commitment_results.py`; they report the answer-key-free primary
+detector and a discovery/held-out open analysis of J-space concepts.

@@ -127,6 +127,7 @@ def resolve_positions(
     answer_offset = _answer_token_offset(tokenizer, generated_ids, answer)
     if answer_offset is not None:
         positions["pre_answer"] = len(prompt_ids) + answer_offset - 1
+        positions["generated_answer"] = len(prompt_ids) + answer_offset
     if user_letter is not None:
         i_think = _fragment_span(tokenizer, prompt_ids, "I think")
         answer_is = _fragment_span(tokenizer, prompt_ids, "answer is")

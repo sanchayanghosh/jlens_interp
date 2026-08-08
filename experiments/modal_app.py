@@ -5,6 +5,7 @@ Examples:
     modal run experiments/modal_app.py::smoke --model unsloth/Meta-Llama-3.1-8B-Instruct
     modal run experiments/modal_app.py::run --model unsloth/Meta-Llama-3.1-8B-Instruct
     modal run experiments/modal_app.py::run_expanded --model unsloth/Meta-Llama-3.1-8B-Instruct
+    modal run experiments/modal_app.py::run_commitment --model unsloth/Meta-Llama-3.1-8B-Instruct
 
 Override the default H100 with ``JLENS_MODAL_GPU=A100-80GB`` when desired.
 """
@@ -28,6 +29,10 @@ DEFAULT_RESULTS = REPO_ROOT / "experiments" / "results" / "raw_results.json"
 DEFAULT_EXPANDED_CASES = REPO_ROOT / "experiments" / "expanded_cases.json"
 DEFAULT_EXPANDED_RESULTS = (
     REPO_ROOT / "experiments" / "results" / "expanded_summary.json"
+)
+DEFAULT_COMMITMENT_CASES = REPO_ROOT / "experiments" / "commitment_cases.json"
+DEFAULT_COMMITMENT_RESULTS = (
+    REPO_ROOT / "experiments" / "results" / "commitment_raw.json"
 )
 
 image = (
@@ -141,6 +146,33 @@ def run_expanded_remote(
     return summary
 
 
+@app.function(image=image, gpu=GPU, volumes=VOLUMES, timeout=7200)
+def run_commitment_remote(
+    payload: dict[str, Any],
+    model: str,
+    lens_repo: str,
+    lens_filename: str,
+    max_new_tokens: int,
+    top_k: int,
+    max_examples: int | None,
+) -> dict[str, Any]:
+    """Run compact full-vocabulary readouts for the single-shot experiment."""
+    from experiments.commitment_runtime import run_commitment_payload
+
+    result = run_commitment_payload(
+        payload,
+        model,
+        lens_repo,
+        lens_filename,
+        cache_dir="/cache/huggingface",
+        max_new_tokens=max_new_tokens,
+        top_k=top_k,
+        max_examples=max_examples,
+    )
+    hf_cache.commit()
+    return result
+
+
 def _execute(
     cases_path: str,
     output_path: str,
@@ -237,4 +269,33 @@ def run_expanded(
     destination.write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary["metadata"], indent=2))
     print(json.dumps(summary["regenerated_behavior_counts"], indent=2))
+    print(f"Wrote {destination}")
+
+
+@app.local_entrypoint()
+def run_commitment(
+    model: str,
+    cases_path: str = str(DEFAULT_COMMITMENT_CASES),
+    output_path: str = str(DEFAULT_COMMITMENT_RESULTS),
+    lens_repo: str = DEFAULT_LENS_REPO,
+    lens_filename: str = DEFAULT_LENS_FILENAME,
+    max_new_tokens: int = 256,
+    top_k: int = 25,
+    max_examples: int | None = None,
+) -> None:
+    """Run the matched single-shot detector and open concept readouts."""
+    payload = json.loads(Path(cases_path).expanduser().read_text())
+    result = run_commitment_remote.remote(
+        payload,
+        model,
+        lens_repo,
+        lens_filename,
+        max_new_tokens,
+        top_k,
+        max_examples,
+    )
+    destination = Path(output_path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result["metadata"], indent=2))
     print(f"Wrote {destination}")
