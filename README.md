@@ -294,3 +294,24 @@ python src/generate_sycophancy_rollouts.py \
 The current test suite covers prompt construction, deterministic labels, pilot and expanded case
 selection, four-layout generation, regenerated behavior classification, persistent crossovers,
 and summary aggregation.
+
+
+# Run R Lens
+
+Step 1 : Install requirements.txt from the root of the repository
+Step 2 : Generate a HF_TOKEN from huggingface
+Run - `modal secret create huggingface-secret HF_TOKEN=hf_huggingface_tokens`
+
+Step 3 - Generate a modal access token from the modal dashabord. 
+Run - `modal token set --token-id ak-token-id --token-secret as-token-secret`
+
+Step 4 - Deploy modal_backend.py
+Run - `modal deploy modal_backend.py`
+
+Step 5 - Runs fastapi local_app.py
+Run - `fastapi run --port 8080 local_app.py`
+
+Step 6 - Add your multiturn prompts (as lists) to bulk_runner.py
+Run - `python bulk_runner.py`
+
+Step 7 -  Now load up  http://localhost:8080. You can now see the RLens readout per token of model output. This will be a grid with the layers on the Y-axis and the model output on the X-axis, and per token readout in a grid graph.
